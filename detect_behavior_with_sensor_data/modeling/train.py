@@ -1,106 +1,186 @@
+import json
 import os
+from pathlib import Path
 
 import joblib
-import lightgbm as lgb
 import numpy as np
 import pandas as pd
+import xgboost as xgb
 from sklearn.metrics import f1_score
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import LabelEncoder
 
-# Paths
-FEATURES_PATH = os.path.join("data/processed", "features_train.csv")
-MODEL_DIR = os.path.join("models")
-os.makedirs(MODEL_DIR, exist_ok=True)
+# importa config
+import detect_behavior_with_sensor_data.config as config
+
+# Paths (usa config)
+FEATURES_PATH = config.PROCESSED_DATA_DIR / "features_train.csv"
+MODEL_DIR = config.MODELS_DIR
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 # Config
-N_SPLITS = 5
-RANDOM_STATE = 42
+N_SPLITS = config.N_SPLITS
+RANDOM_STATE = config.RANDOM_STATE
+XGB_PARAMS = config.XGB_PARAMS.copy()
+EARLY_STOPPING = getattr(config, "EARLY_STOPPING_ROUNDS", 50)
 
-# Load features
+# Carrega dados
 df = pd.read_csv(FEATURES_PATH, index_col=0)
-X = df.drop(columns=["gesture", "sequence_type", "subject"])
+print("Loaded features:", df.shape)
+
+# função util para escolher colunas baseado em config.TRAIN_ON
+def select_feature_columns(df: pd.DataFrame, train_on: dict):
+    cols = []
+    # IMU group
+    if train_on.get("imu", False):
+        imu_prefixes = ("acc_", "rot_", "linacc_", "acc_mag")
+        cols += [c for c in df.columns if c.startswith(imu_prefixes)]
+    # Thermopiles
+    if train_on.get("thm", False):
+        cols += [c for c in df.columns if c.startswith("thm_")]
+    # ToF
+    if train_on.get("tof", False):
+        cols += [c for c in df.columns if c.startswith("tof")]
+    # seq length
+    if train_on.get("seq_length", False) and "seq_length" in df.columns:
+        cols += ["seq_length"]
+    # demographics
+    if train_on.get("demo", False):
+        demo_cols = [
+            "adult_child",
+            "age",
+            "sex",
+            "handedness",
+            "height_cm",
+            "shoulder_to_wrist_cm",
+            "elbow_to_wrist_cm",
+        ]
+        cols += [c for c in demo_cols if c in df.columns]
+    # remove duplicates & meta
+    cols = [c for c in pd.unique(cols) if c not in ("gesture", "sequence_type", "subject")]
+    return cols
+
+selected_cols = select_feature_columns(df, config.TRAIN_ON)
+if len(selected_cols) == 0:
+    raise RuntimeError("Nenhuma coluna selecionada para treino — verifique config.TRAIN_ON")
+
+print(f"Selected {len(selected_cols)} feature cols for training")
+
+# Prepare matrices
+X = df[selected_cols].fillna(0)
 y_gesture = df["gesture"].values
 y_binary = (df["sequence_type"] == "target").astype(int).values
 subjects = df["subject"].values
 
-# Label encode gesture for multiclass
+# Label encode gesture
 gesture_le = LabelEncoder()
 y_multiclass = gesture_le.fit_transform(y_gesture)
 num_classes = len(gesture_le.classes_)
-joblib.dump(gesture_le, os.path.join(MODEL_DIR, 'label_encoder.pkl'))
+joblib.dump(gesture_le, MODEL_DIR / "label_encoder.pkl")
+print("num classes:", num_classes)
 
-# Identify target class indices explicitly
+# identify target class indices
 target_gestures = df.loc[df['sequence_type']=='target', 'gesture'].unique()
 target_class_indices = gesture_le.transform(target_gestures)
 
-# Cross-validation
+# CV
 cv = GroupKFold(n_splits=N_SPLITS)
+oof_preds = np.zeros((len(X), num_classes))
+best_rounds = []
 scores_binary = []
 scores_macro = []
-oof_preds = np.zeros((len(X), num_classes))
-best_iters = []
 
 for fold, (train_idx, val_idx) in enumerate(cv.split(X, groups=subjects)):
-    X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-    y_train_mc = y_multiclass[train_idx]
-    y_val_mc   = y_multiclass[val_idx]
-    y_train_bin= y_binary[train_idx]
-    y_val_bin  = y_binary[val_idx]
+    print(f"Fold {fold} training...")
+    X_tr, X_va = X.iloc[train_idx], X.iloc[val_idx]
+    y_tr_mc, y_va_mc = y_multiclass[train_idx], y_multiclass[val_idx]
+    y_tr_bin, y_va_bin = y_binary[train_idx], y_binary[val_idx]
 
-    model = lgb.LGBMClassifier(
-        objective='multiclass',
-        num_class=num_classes,
-        learning_rate=0.1,
-        num_leaves=31,
-        n_estimators=1000,
-        random_state=RANDOM_STATE
-    )
-    model.fit(
-        X_train, y_train_mc,
-        eval_set=[(X_val, y_val_mc)],
-        eval_metric='multi_logloss',
-        callbacks=[lgb.early_stopping(50)],
-    )
+    # XGBoost classifier wrapper
+    clf = xgb.XGBClassifier(**XGB_PARAMS, num_class=num_classes, use_label_encoder=False)
+    # Fit with early stopping
+    try:
+        clf.fit(
+            X_tr, y_tr_mc,
+            eval_set=[(X_va, y_va_mc)],
+            # early_stopping_rounds=EARLY_STOPPING,
+            verbose=False,
+        )
+    except TypeError:
+        # some xgboost versions use different param signature; retry without verbose arg
+        clf.fit(X_tr, y_tr_mc, eval_set=[(X_va, y_va_mc)], early_stopping_rounds=EARLY_STOPPING)
 
-    best_iters.append(model.best_iteration_)
+    best_it = getattr(clf, "best_iteration", None) or getattr(clf, "best_ntree_limit", None)
+    best_rounds.append(int(best_it) if best_it is not None else XGB_PARAMS.get("n_estimators", 100))
 
-    # OOF predictions
-    preds_proba = model.predict_proba(X_val)
-    oof_preds[val_idx] = preds_proba
-    preds_mc = np.argmax(preds_proba, axis=1)
-
-    # Clear binary conversion using explicit target indices
+    proba_va = clf.predict_proba(X_va)
+    oof_preds[val_idx] = proba_va
+    preds_mc = np.argmax(proba_va, axis=1)
     preds_bin = np.isin(preds_mc, target_class_indices).astype(int)
 
-    # Metrics
-    f1_bin   = f1_score(y_val_bin, preds_bin)
-    f1_macro = f1_score(y_val_mc, preds_mc, average='macro')
+    f1_bin = f1_score(y_va_bin, preds_bin)
+    f1_mac = f1_score(y_va_mc, preds_mc, average='macro')
     scores_binary.append(f1_bin)
-    scores_macro.append(f1_macro)
+    scores_macro.append(f1_mac)
 
-    print(f"Fold {fold}: Binary-F1={f1_bin:.4f}, Macro-F1={f1_macro:.4f}, BestIter={model.best_iteration_}")
-    joblib.dump(model, os.path.join(MODEL_DIR, f"lgbm_fold{fold}.pkl"))
+    print(f"Fold {fold}: Binary-F1={f1_bin:.4f}, Macro-F1={f1_mac:.4f}, best_it={best_it}")
+    joblib.dump(clf, MODEL_DIR / f"xgb_fold{fold}.pkl")
 
 print(f"\nCV Binary-F1: {np.mean(scores_binary):.4f} ± {np.std(scores_binary):.4f}")
 print(f"CV Macro-F1: {np.mean(scores_macro):.4f} ± {np.std(scores_macro):.4f}")
-avg_best_iter = int(np.mean(best_iters))
-print(f"Average best iteration: {avg_best_iter}")
+avg_best_round = int(np.mean([r for r in best_rounds if r is not None]))
+print("Average best round:", avg_best_round)
 
-# Save OOF preds
+# Save OOF preds + true + pred
 oof_df = pd.DataFrame(oof_preds, index=X.index, columns=gesture_le.classes_)
-oof_df.to_csv(os.path.join(MODEL_DIR, 'oof_preds.csv'))
+oof_df['y_true_idx'] = y_multiclass
+oof_df['y_pred_idx'] = np.argmax(oof_preds, axis=1)
+oof_df['gesture_true'] = y_gesture
+oof_df['gesture_pred'] = gesture_le.inverse_transform(oof_df['y_pred_idx'].astype(int))
+oof_df.to_csv(MODEL_DIR / "oof_preds.csv")
+print("Saved OOF to", MODEL_DIR / "oof_preds.csv")
 
-# Train final on full data
+# Train final model on full dataset
 print("Training final model on full dataset...")
-full_model = lgb.LGBMClassifier(
-    objective='multiclass',
-    num_class=num_classes,
-    learning_rate=0.1,
-    num_leaves=31,
-    n_estimators=avg_best_iter,
-    random_state=RANDOM_STATE
-)
-full_model.fit(X, y_multiclass)
-joblib.dump(full_model, os.path.join(MODEL_DIR, 'lgbm_full.pkl'))
-print("Final model trained and saved as lgbm_full.pkl")
+
+final_n_estimators = avg_best_round if avg_best_round > 0 else XGB_PARAMS.get("n_estimators", 100)
+final_params = XGB_PARAMS.copy()
+final_params["n_estimators"] = final_n_estimators
+
+final_clf = xgb.XGBClassifier(**final_params, num_class=num_classes, use_label_encoder=False, verbosity=0)
+final_clf.fit(X, y_multiclass)
+
+# Mode name for files: 'imu_only' if only imu selected, else 'full'
+is_imu_only = config.TRAIN_ON.get("imu", False) and not config.TRAIN_ON.get("thm", False) and not config.TRAIN_ON.get("tof", False)
+mode = "imu_only" if is_imu_only else "full"
+
+final_model_path = MODEL_DIR / f"xgb_full_{mode}.pkl"
+joblib.dump(final_clf, final_model_path)
+print("Saved final model to", final_model_path)
+
+# Save list of features used + metadata
+if getattr(config, "SAVE_FEATURE_LIST", True):
+    feat_file = MODEL_DIR / f"features_used_{mode}.json"
+    meta = {
+        "features": selected_cols,
+        "train_on": config.TRAIN_ON,
+        "model_type": "xgboost",
+        "is_imu_only": bool(is_imu_only),
+        "num_classes": int(num_classes),
+    }
+    with open(feat_file, "w") as fh:
+        json.dump(meta, fh, indent=2)
+    print("Saved feature list & metadata to", feat_file)
+
+# Save a separate model metadata file
+meta_file = MODEL_DIR / f"model_metadata_{mode}.json"
+model_meta = {
+    "model_path": str(final_model_path),
+    "model_type": "xgboost",
+    "params": final_params,
+    "is_imu_only": bool(is_imu_only),
+    "features_file": str(feat_file) if getattr(config, "SAVE_FEATURE_LIST", True) else None,
+}
+with open(meta_file, "w") as fh:
+    json.dump(model_meta, fh, indent=2)
+print("Saved model metadata to", meta_file)
