@@ -1,62 +1,83 @@
-# detect-behavior-with-sensor-data
+# Project Overview
 
-<a target="_blank" href="https://cookiecutter-data-science.drivendata.org/">
-    <img src="https://img.shields.io/badge/CCDS-Project%20template-328F97?logo=cookiecutter" />
-</a>
+This repository contains the codebase for a gesture recognition system designed for the **CMI Competition**.  
+It focuses on training and evaluating machine learning models to classify gesture sequences based on a combination of IMU (Inertial Measurement Unit) and other sensor data.  
+The main objective is to maximize classification accuracy while ensuring the pipeline is modular, reproducible, and easy to adapt to new data sources or model architectures.
 
-develop a predictive model that distinguishes BFRB-like and non-BFRB-like activity using data from a variety of sensors collected via a wrist-worn device. Successfully disentangling these behaviors will improve the design and accuracy of wearable BFRB-detection devices, which are relevant to a wide range of mental illnesses, ultimately strengthening the tools available to support their treatment.
+---
 
-## Project Organization
+## Context
 
-```
-├── LICENSE            <- Open-source license if one is chosen
-├── Makefile           <- Makefile with convenience commands like `make data` or `make train`
-├── README.md          <- The top-level README for developers using this project.
-├── data
-│   ├── external       <- Data from third party sources.
-│   ├── interim        <- Intermediate data that has been transformed.
-│   ├── processed      <- The final, canonical data sets for modeling.
-│   └── raw            <- The original, immutable data dump.
-│
-├── docs               <- A default mkdocs project; see www.mkdocs.org for details
-│
-├── models             <- Trained and serialized models, model predictions, or model summaries
-│
-├── notebooks          <- Jupyter notebooks. Naming convention is a number (for ordering),
-│                         the creator's initials, and a short `-` delimited description, e.g.
-│                         `1.0-jqp-initial-data-exploration`.
-│
-├── pyproject.toml     <- Project configuration file with package metadata for 
-│                         detect_behavior_with_sensor_data and configuration for tools like black
-│
-├── references         <- Data dictionaries, manuals, and all other explanatory materials.
-│
-├── reports            <- Generated analysis as HTML, PDF, LaTeX, etc.
-│   └── figures        <- Generated graphics and figures to be used in reporting
-│
-├── requirements.txt   <- The requirements file for reproducing the analysis environment, e.g.
-│                         generated with `pip freeze > requirements.txt`
-│
-├── setup.cfg          <- Configuration file for flake8
-│
-└── detect_behavior_with_sensor_data   <- Source code for use in this project.
-    │
-    ├── __init__.py             <- Makes detect_behavior_with_sensor_data a Python module
-    │
-    ├── config.py               <- Store useful variables and configuration
-    │
-    ├── dataset.py              <- Scripts to download or generate data
-    │
-    ├── features.py             <- Code to create features for modeling
-    │
-    ├── modeling                
-    │   ├── __init__.py 
-    │   ├── predict.py          <- Code to run model inference with trained models          
-    │   └── train.py            <- Code to train models
-    │
-    └── plots.py                <- Code to create visualizations
-```
+This project was created to address a competition task involving **sequence classification**.  
+The input data is a combination of IMU sensor readings and possibly other time-series features.  
+The goal is to **predict the correct gesture class** for each sequence.
 
---------
+Unlike standard gesture recognition approaches, this repository focuses on:
+- Handling large datasets efficiently.
+- Providing a modular approach for experimentation with various modeling strategies.
+- Supporting rapid prototyping for both feature engineering and model training.
 
-# detect-behavior-with-sensor-data
+---
+
+## Repository Structure
+
+### `preprocessing/`
+Handles **data loading, cleaning, and transformation**.  
+This includes:
+- Removing invalid or inconsistent samples.
+- Handling missing values.
+- Feature scaling and normalization.
+- Generating derived features.
+
+### `feature_selection/`
+Implements **optional feature selection steps**.  
+The code supports different methods like:
+- Lasso-based selection.
+- Sequential Feature Selection (SFS).
+- Bootstrapping for feature stability analysis.  
+> **Note**: For large datasets, you may choose to skip feature selection entirely.
+
+### `model_training/`
+Core training scripts for multiple algorithms, including:
+- **LightGBM** for tabular features.
+- Potential integration with **deep learning** for raw sequences.
+- Support for **K-Fold cross-validation** (can be skipped if hyperparameter tuning is not required).
+
+### `inference/`
+Handles the generation of predictions for submission:
+- Loads trained models.
+- Runs inference on test data.
+- Outputs results in the required submission format.
+
+---
+
+## Optimization Priorities
+
+When using this repository, the main areas to optimize for performance are:
+
+1. **Feature Engineering**
+   - Improve signal representation (e.g., frequency-domain features, sensor fusion).
+   - Experiment with data augmentation for sequences.
+
+2. **Model Selection**
+   - Compare boosting methods (LightGBM, CatBoost, XGBoost) for tabular data.
+   - Consider RNNs, CNNs, or Transformers for sequential modeling.
+
+3. **Ensembling**
+   - Blend predictions from IMU-only models and full-feature models.
+   - Stack multiple classifiers for improved generalization.
+
+4. **Data Preprocessing**
+   - Ensure train/test distributions match.
+   - Normalize/scale consistently across splits.
+
+---
+
+## Requirements
+
+To run this repository, ensure you have:
+
+- **Python 3.8+**
+- Installed dependencies:
+  ```bash
+  pip install -r requirements.txt
