@@ -6,6 +6,9 @@ import joblib
 import numpy as np
 import pandas as pd
 import xgboost as xgb
+import lightgbm as lgb
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import f1_score
 from sklearn.model_selection import GroupKFold
 from sklearn.preprocessing import LabelEncoder
@@ -21,8 +24,78 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 # Config
 N_SPLITS = config.N_SPLITS
 RANDOM_STATE = config.RANDOM_STATE
-XGB_PARAMS = config.XGB_PARAMS.copy()
+MODEL_TYPE = config.MODEL_TYPE
+MODEL_PARAMS = config.MODEL_PARAMS[MODEL_TYPE].copy()
 EARLY_STOPPING = getattr(config, "EARLY_STOPPING_ROUNDS", 50)
+
+def create_model(model_type: str, num_classes: int, **kwargs):
+    """Factory function to create different model types"""
+    if model_type == "xgboost":
+        params = MODEL_PARAMS.copy()
+        params.update(kwargs)
+        params["num_class"] = num_classes
+        return xgb.XGBClassifier(**params, use_label_encoder=False)
+    elif model_type == "lightgbm":
+        params = MODEL_PARAMS.copy()
+        params.update(kwargs)
+        params["num_class"] = num_classes
+        return lgb.LGBMClassifier(**params)
+    elif model_type == "random_forest":
+        params = MODEL_PARAMS.copy()
+        params.update(kwargs)
+        return RandomForestClassifier(**params)
+    elif model_type == "logistic_regression":
+        params = MODEL_PARAMS.copy()
+        params.update(kwargs)
+        return LogisticRegression(**params)
+    else:
+        raise ValueError(f"Unsupported model type: {model_type}")
+
+def fit_model(model, X_train, y_train, X_val=None, y_val=None, model_type=None):
+    """Fit model with appropriate method based on model type"""
+    if model_type in ["xgboost", "lightgbm"] and X_val is not None and y_val is not None:
+        # Gradient boosting models with early stopping
+        try:
+            if model_type == "xgboost":
+                # Try different XGBoost API versions
+                try:
+                    model.fit(
+                        X_train, y_train,
+                        eval_set=[(X_val, y_val)],
+                        early_stopping_rounds=EARLY_STOPPING,
+                        verbose=False,
+                    )
+                except TypeError:
+                    # Newer XGBoost versions use callbacks
+                    model.fit(
+                        X_train, y_train,
+                        eval_set=[(X_val, y_val)],
+                        callbacks=[xgb.callback.EarlyStopping(rounds=EARLY_STOPPING)],
+                        verbose=False,
+                    )
+            else:  # lightgbm
+                model.fit(
+                    X_train, y_train,
+                    eval_set=[(X_val, y_val)],
+                    callbacks=[lgb.early_stopping(EARLY_STOPPING), lgb.log_evaluation(0)]
+                )
+        except Exception as e:
+            # Final fallback - fit without early stopping
+            print(f"Warning: Early stopping failed for {model_type}, fitting without it: {e}")
+            model.fit(X_train, y_train)
+    else:
+        # Standard sklearn fit for other models
+        model.fit(X_train, y_train)
+    
+    return model
+
+def get_best_iteration(model, model_type):
+    """Get best iteration for gradient boosting models"""
+    if model_type == "xgboost":
+        return getattr(model, "best_iteration", None) or getattr(model, "best_ntree_limit", None)
+    elif model_type == "lightgbm":
+        return getattr(model, "best_iteration_", None)
+    return None
 
 # Carrega dados
 df = pd.read_csv(FEATURES_PATH, index_col=0)
@@ -57,7 +130,8 @@ def select_feature_columns(df: pd.DataFrame, train_on: dict):
         ]
         cols += [c for c in demo_cols if c in df.columns]
     # remove duplicates & meta
-    cols = [c for c in pd.unique(cols) if c not in ("gesture", "sequence_type", "subject")]
+    cols = list(set(cols))  # remove duplicates
+    cols = [c for c in cols if c not in ("gesture", "sequence_type", "subject")]
     return cols
 
 selected_cols = select_feature_columns(df, config.TRAIN_ON)
@@ -97,21 +171,12 @@ for fold, (train_idx, val_idx) in enumerate(cv.split(X, groups=subjects)):
     y_tr_bin, y_va_bin = y_binary[train_idx], y_binary[val_idx]
 
     # XGBoost classifier wrapper
-    clf = xgb.XGBClassifier(**XGB_PARAMS, num_class=num_classes, use_label_encoder=False)
+    clf = create_model(MODEL_TYPE, num_classes)
     # Fit with early stopping
-    try:
-        clf.fit(
-            X_tr, y_tr_mc,
-            eval_set=[(X_va, y_va_mc)],
-            # early_stopping_rounds=EARLY_STOPPING,
-            verbose=False,
-        )
-    except TypeError:
-        # some xgboost versions use different param signature; retry without verbose arg
-        clf.fit(X_tr, y_tr_mc, eval_set=[(X_va, y_va_mc)], early_stopping_rounds=EARLY_STOPPING)
+    clf = fit_model(clf, X_tr, y_tr_mc, X_va, y_va_mc, MODEL_TYPE)
 
-    best_it = getattr(clf, "best_iteration", None) or getattr(clf, "best_ntree_limit", None)
-    best_rounds.append(int(best_it) if best_it is not None else XGB_PARAMS.get("n_estimators", 100))
+    best_it = get_best_iteration(clf, MODEL_TYPE)
+    best_rounds.append(int(best_it) if best_it is not None else MODEL_PARAMS.get("n_estimators", 100))
 
     proba_va = clf.predict_proba(X_va)
     oof_preds[val_idx] = proba_va
@@ -124,7 +189,7 @@ for fold, (train_idx, val_idx) in enumerate(cv.split(X, groups=subjects)):
     scores_macro.append(f1_mac)
 
     print(f"Fold {fold}: Binary-F1={f1_bin:.4f}, Macro-F1={f1_mac:.4f}, best_it={best_it}")
-    joblib.dump(clf, MODEL_DIR / f"xgb_fold{fold}.pkl")
+    joblib.dump(clf, MODEL_DIR / f"{MODEL_TYPE}_fold{fold}.pkl")
 
 print(f"\nCV Binary-F1: {np.mean(scores_binary):.4f} ± {np.std(scores_binary):.4f}")
 print(f"CV Macro-F1: {np.mean(scores_macro):.4f} ± {np.std(scores_macro):.4f}")
@@ -143,18 +208,18 @@ print("Saved OOF to", MODEL_DIR / "oof_preds.csv")
 # Train final model on full dataset
 print("Training final model on full dataset...")
 
-final_n_estimators = avg_best_round if avg_best_round > 0 else XGB_PARAMS.get("n_estimators", 100)
-final_params = XGB_PARAMS.copy()
+final_n_estimators = avg_best_round if avg_best_round > 0 else MODEL_PARAMS.get("n_estimators", 100)
+final_params = MODEL_PARAMS.copy()
 final_params["n_estimators"] = final_n_estimators
 
-final_clf = xgb.XGBClassifier(**final_params, num_class=num_classes, use_label_encoder=False, verbosity=0)
-final_clf.fit(X, y_multiclass)
+final_clf = create_model(MODEL_TYPE, num_classes, **final_params)
+final_clf = fit_model(final_clf, X, y_multiclass, model_type=MODEL_TYPE)
 
 # Mode name for files: 'imu_only' if only imu selected, else 'full'
 is_imu_only = config.TRAIN_ON.get("imu", False) and not config.TRAIN_ON.get("thm", False) and not config.TRAIN_ON.get("tof", False)
 mode = "imu_only" if is_imu_only else "full"
 
-final_model_path = MODEL_DIR / f"xgb_full_{mode}.pkl"
+final_model_path = MODEL_DIR / f"{MODEL_TYPE}_full_{mode}.pkl"
 joblib.dump(final_clf, final_model_path)
 print("Saved final model to", final_model_path)
 
@@ -164,7 +229,7 @@ if getattr(config, "SAVE_FEATURE_LIST", True):
     meta = {
         "features": selected_cols,
         "train_on": config.TRAIN_ON,
-        "model_type": "xgboost",
+        "model_type": MODEL_TYPE,
         "is_imu_only": bool(is_imu_only),
         "num_classes": int(num_classes),
     }
@@ -176,7 +241,7 @@ if getattr(config, "SAVE_FEATURE_LIST", True):
 meta_file = MODEL_DIR / f"model_metadata_{mode}.json"
 model_meta = {
     "model_path": str(final_model_path),
-    "model_type": "xgboost",
+    "model_type": MODEL_TYPE,
     "params": final_params,
     "is_imu_only": bool(is_imu_only),
     "features_file": str(feat_file) if getattr(config, "SAVE_FEATURE_LIST", True) else None,

@@ -25,11 +25,12 @@ def _safe_joblib_load(p: Path):
         logger.warning(f"Could not load {p}: {e}")
         return None
 
-# Primary models
-MODEL_FULL_PATH = MODELS_DIR / "lgbm_full.pkl"
-MODEL_IMU_PATH  = MODELS_DIR / "lgbm_full_imu_only.pkl"
+# Primary models - dynamically determine model type from config
+MODEL_TYPE = config.MODEL_TYPE
+MODEL_FULL_PATH = MODELS_DIR / f"{MODEL_TYPE}_full_full.pkl"
+MODEL_IMU_PATH  = MODELS_DIR / f"{MODEL_TYPE}_full_imu_only.pkl"
 LE_PATH         = MODELS_DIR / "label_encoder.pkl"
-FEATURE_LIST_P  = MODELS_DIR / "features_used_full.json"  # optional: saved feature ordering
+FEATURE_LIST_P  = MODELS_DIR / f"features_used_full.json"  # optional: saved feature ordering
 
 model_full = _safe_joblib_load(MODEL_FULL_PATH)
 model_imu  = _safe_joblib_load(MODEL_IMU_PATH)

@@ -22,6 +22,9 @@ REPORTS_DIR = PROJ_ROOT / "reports"
 FIGURES_DIR = REPORTS_DIR / "figures"
 
 # == Train / model control ==
+# Model selection - choose which model to train
+MODEL_TYPE = "xgboost"  # Options: "xgboost", "lightgbm", "random_forest", "logistic_regression"
+
 # Escolha quais blocos de features usar no treino.
 TRAIN_ON = {
     "imu": True,        # a maioria das features que começam com acc_, rot_, linacc_, acc_mag
@@ -35,27 +38,47 @@ TRAIN_ON = {
 N_SPLITS = 5
 RANDOM_STATE = 42
 
-# XGBoost defaults (ajuste conforme precisar)
-XGB_PARAMS = {
-    "objective": "multi:softprob",
-    "learning_rate": 0.1,
-    "max_depth": 6,
-    "n_estimators": 1000,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-    "verbosity": 0,
-    # "use_label_encoder": False  # not needed for sklearn wrapper in some versions
+# Model parameters - organized by model type
+MODEL_PARAMS = {
+    "xgboost": {
+        "objective": "multi:softprob",
+        "learning_rate": 0.1,
+        "max_depth": 6,
+        "n_estimators": 1000,
+        "subsample": 0.8,
+        "colsample_bytree": 0.8,
+        "verbosity": 0,
+        "random_state": RANDOM_STATE,
+    },
+    "lightgbm": {
+        "objective": "multiclass",
+        "learning_rate": 0.1,
+        "num_leaves": 31,
+        "n_estimators": 1000,
+        "random_state": RANDOM_STATE,
+        "verbosity": -1,
+    },
+    "random_forest": {
+        "n_estimators": 100,
+        "max_depth": 10,
+        "min_samples_split": 2,
+        "min_samples_leaf": 1,
+        "random_state": RANDOM_STATE,
+        "n_jobs": -1,
+    },
+    "logistic_regression": {
+        "C": 1.0,
+        "max_iter": 1000,
+        "random_state": RANDOM_STATE,
+        "n_jobs": -1,
+    }
 }
 
-LGB_PARAMS = {
-    "objective": "multiclass",
-    "learning_rate": 0.1,
-    "num_leaves": 31,
-    "n_estimators": 1000,
-    "random_state": RANDOM_STATE,
-}
+# Legacy parameters for backward compatibility
+XGB_PARAMS = MODEL_PARAMS["xgboost"]
+LGB_PARAMS = MODEL_PARAMS["lightgbm"]
 
-# Early stopping rounds used when fitting with eval_set
+# Early stopping rounds used when fitting with eval_set (only for gradient boosting models)
 EARLY_STOPPING_ROUNDS = 50
 
 # Se quiser salvar a lista de colunas do modelo para uso no inference step
